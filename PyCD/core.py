@@ -1,4 +1,7 @@
-#!/usr/bin/env python
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
 """
 kMC model to run kinetic Monte Carlo simulations and compute mean
 square displacement of random walk of charge carriers on 3D lattice
@@ -1116,7 +1119,6 @@ class System(object):
         sort_indices = np.argsort(energy_contribution_data)[::-1]
         sorted_new_k_vectors_consolidated = new_k_vectors_consolidated[sort_indices]
         sorted_energy_contribution_data = energy_contribution_data[sort_indices]
-        prefix_list = []
         prefix_list.append(f'k-vectors sorted in the decreasing order of their energy contributions\n')
         for k_vector_index in range(num_new_k_vectors_consolidated):
             k_vector = sorted_new_k_vectors_consolidated[k_vector_index]
@@ -2064,6 +2066,84 @@ class Run(object):
                             self.system.hop_neighbor_list,
                             available_site_indices, map_index, num_dopants))
                     dopant_site_indices[dopant_element_type] = dopant_type_dopant_site_indices
+                elif insertion_type == 'pairwise':
+                    system_size = self.system.system_size
+                    num_cells = system_size.prod()
+                    substitution_element_type = self.substitution_element_types[map_index]
+                    substitution_element_type_index = self.material.element_types.index(
+                                                                substitution_element_type)
+                    system_element_index_offset_array = np.repeat(
+                                np.arange(
+                                    0, (self.material.total_elements_per_unit_cell
+                                        * num_cells),
+                                    self.material.total_elements_per_unit_cell),
+                                self.material.n_elements_per_unit_cell[
+                                                substitution_element_type_index])
+                    site_indices = (
+                        np.tile(self.material.n_elements_per_unit_cell[
+                                    :substitution_element_type_index].sum()
+                                + np.arange(0,
+                                            self.material.n_elements_per_unit_cell[
+                                                substitution_element_type_index]),
+                                num_cells)
+                        + system_element_index_offset_array)
+                    num_site_indices = len(site_indices)
+                    pair_wise_distance_vector_array = np.zeros((num_site_indices, num_site_indices, self.neighbors.n_dim))
+                    for index, site_index in enumerate(site_indices):
+                        pair_wise_distance_vector_array[index, :] = self.system.pairwise_min_image_vector_data[site_index][site_indices]
+                    pair_wise_distance_array = np.linalg.norm(pair_wise_distance_vector_array, axis=2)
+                    intra_pair_distance_ang = self.doping['pairwise'][map_index]['intra_pair_distance']
+                    intra_pair_distance = intra_pair_distance_ang * constants.ANG2BOHR
+                    rounding_digits = len(str(intra_pair_distance_ang).split(".")[1])
+                    desired_pair_internal_indices_temp = np.where(pair_wise_distance_array.round(rounding_digits) == np.round(intra_pair_distance, rounding_digits))
+                    desired_pair_internal_indices = np.hstack((desired_pair_internal_indices_temp[0][:, None], desired_pair_internal_indices_temp[1][:, None]))
+
+                    # avoiding duplicate pairs
+                    desired_pair_internal_indices = desired_pair_internal_indices[desired_pair_internal_indices[:, 1] > desired_pair_internal_indices[:, 0]]
+                    desired_pair_indices = site_indices[desired_pair_internal_indices]
+                    num_pairs = len(desired_pair_indices)
+
+                    # arrange pairs in plane_of_arrangement
+                    plane_of_arrangement = self.doping['pairwise'][map_index]['plane_of_arrangement']
+                    cumulative_pair_indices = desired_pair_indices.flatten()
+                    site_positions = np.zeros((2 * num_pairs, self.neighbors.n_dim))
+                    for index, site_index in enumerate(cumulative_pair_indices):
+                        site_positions[index] = self.neighbors.get_coordinates(system_size, site_index)
+                    site_positions = np.dot(site_positions,
+                                            np.linalg.inv(self.material.lattice_matrix * system_size))
+                    plane_contributions = np.zeros(2 * num_pairs)
+                    plane_contributions_max = 0
+                    for dim_index in range(self.neighbors.n_dim):
+                        if plane_of_arrangement[dim_index] != 0:
+                            plane_contributions += site_positions[:, dim_index] / plane_of_arrangement[dim_index]
+                            plane_contributions_max += 1
+                    sort_indices_plane_contributions = np.argsort(plane_contributions)
+                    sorted_plane_contributions = plane_contributions[sort_indices_plane_contributions]
+                    sorted_pair_indices = cumulative_pair_indices[sort_indices_plane_contributions]
+                    rounding_digits_for_plane_contributions = 6
+                    rounded_plane_contributions = sorted_plane_contributions.round(rounding_digits_for_plane_contributions)
+                    unique_plane_contributions = np.unique(rounded_plane_contributions)
+                    num_unique_plane_contributions = len(unique_plane_contributions)
+                    coupled_plane_contributions = np.reshape(unique_plane_contributions, (int(num_unique_plane_contributions / 2), 2))
+                    atoms_sorted_by_plane = np.empty(int(num_unique_plane_contributions / 2), dtype=object)
+                    num_planes = 2 * (system_size[0] + system_size[1])  # plane intersects a and b axis at half-unit cell length
+                    num_atoms_by_plane = np.zeros(num_planes)
+                    for plane_index, plane_contribution in enumerate(coupled_plane_contributions):
+                        atoms_sorted_by_plane[plane_index] = (
+                            np.append(sorted_pair_indices[rounded_plane_contributions == plane_contribution[0]],
+                                      sorted_pair_indices[rounded_plane_contributions == plane_contribution[1]]))
+                        num_atoms_by_plane[plane_index] = len(atoms_sorted_by_plane[plane_index])
+                    inter_plane_spacing = self.doping['pairwise'][map_index]['inter_plane_spacing']
+                    starting_plane_index = 0
+                    selected_plane_indices = range(starting_plane_index, num_planes, inter_plane_spacing)
+                    pair_atoms_in_selected_planes = np.hstack(atoms_sorted_by_plane[selected_plane_indices])
+                    if num_dopants == len(pair_atoms_in_selected_planes):
+                        dopant_site_indices[dopant_element_type] = pair_atoms_in_selected_planes
+                    else:
+                        print(f'Total number of pair atoms available with user-specified inter-plane spacing: {len(pair_atoms_in_selected_planes)}\n')
+                        print(f'Number of pair-wise substitutions ({num_dopants}) did not match with total number of pair atoms available.\n')
+                        print(f'Please re-run by changing number of pair-wise substitutions to {len(pair_atoms_in_selected_planes)}\n')
+                        exit()
                 dopant_types_inserted += 1
             elif insertion_type == 'gradient':
                 # NOTE: 'available_site_indices' is populated based on an isolated step system size.
@@ -2236,8 +2316,14 @@ class Run(object):
         for dopant_element_type, dopant_element_type_site_indices in dopant_site_indices.items():
             dopant_element_type_index = self.dopant_element_types.index(dopant_element_type)
             substitution_element_type = self.substitution_element_types[dopant_element_type_index]
+            dopant_element_type_map = ':'.join([substitution_element_type, dopant_element_type])
+            map_index = self.doping['doping_element_map'].index(dopant_element_type_map)
+            insertion_type = self.doping['insertion_type'][map_index]
             if dopant_element_type == 'X':
                 max_neighbor_shells = 0
+            elif insertion_type == 'pairwise':
+                # set for the specific case of S-S pairwise dopant insertion with inter_plane_spacing == 4
+                max_neighbor_shells = len(self.relative_energies['doping'][substitution_element_type][map_index]) + 3
             else:
                 max_neighbor_shells = self.max_neighbor_shells[substitution_element_type]
             for dopant_site_index in dopant_element_type_site_indices:
@@ -2319,7 +2405,7 @@ class Run(object):
                         and dopant_species_type == species_type
                         and num_dopant_sites and num_species):
                         dopant_element_type = self.dopant_element_types[map_index]
-                        occupancy.extend(dopant_site_indices[dopant_element_type][:num_species])
+                        occupancy.extend(rnd.sample(dopant_site_indices[dopant_element_type], num_species)[:])
                         num_species -= len(dopant_site_indices[dopant_element_type][:num_species])
             if species_type in self.initial_occupancy:
                 occupancy.extend([index for index in self.initial_occupancy[species_type]])
@@ -2401,15 +2487,27 @@ class Run(object):
         rnd.seed(random_seed)
         random_seed_list = [rnd.random() for traj_index in range(self.n_traj)]
         for traj_index in range(self.n_traj):
-            prefix_list = []
             traj_dir_path = dst_path.joinpath(f'traj{traj_index+1}')
             Path.mkdir(traj_dir_path, parents=True, exist_ok=True)
+            random_state_file_path = traj_dir_path.joinpath(f'initial_rnd_state.dump')
+            rnd.seed(random_seed_list[traj_index])
+            pickle.dump(rnd.getstate(), open(random_state_file_path, 'wb'))
+
+        if 'pairwise' in self.doping['insertion_type']:
+            map_index = self.doping['insertion_type'].index('pairwise')
+            pairwise_insertion = self.doping['num_dopants'][map_index] != 0
+        else:
+            pairwise_insertion = 0
+        for traj_index in range(self.n_traj):
+            prefix_list = []
+            traj_dir_path = dst_path.joinpath(f'traj{traj_index+1}')
 
             if self.doping_active:
                 if traj_index == 0:
                     dopant_site_indices_repo = {}
                 dopant_site_indices_repo[traj_index] = {}
-                prefix_list.append(f'Trajectory {traj_index+1}:\n')
+                if not pairwise_insertion:
+                    prefix_list.append(f'Trajectory {traj_index+1}:\n')
                 attempt_number = 1
                 old_min_shell_separation = [-1] * len(self.doping['num_dopants'])
                 while (np.any(old_min_shell_separation < self.doping['min_shell_separation']) and attempt_number <= self.doping['max_attempts']):
@@ -2442,20 +2540,22 @@ class Run(object):
                     self.get_site_wise_shell_indices(dopant_site_element_types,
                                                      system_shell_based_neighbors,
                                                      prefix_list))
-                output_file_path = traj_dir_path / 'site_indices'
+                if pairwise_insertion:
+                    output_file_path = dst_path / 'site_indices'
+                else:
+                    output_file_path = traj_dir_path / 'site_indices'
                 np.save(output_file_path, site_wise_shell_indices_array)
 
                 file_name = 'PreProduction'
                 prefix = ''.join(prefix_list)
                 print_time_elapsed = 0
-                generate_report(self.start_time, traj_dir_path, file_name,
-                                print_time_elapsed, prefix)
-
-        for traj_index in range(self.n_traj):
-            traj_dir_path = dst_path.joinpath(f'traj{traj_index+1}')
-            random_state_file_path = traj_dir_path.joinpath(f'initial_rnd_state.dump')
-            rnd.seed(random_seed_list[traj_index])
-            pickle.dump(rnd.getstate(), open(random_state_file_path, 'wb'))
+                if pairwise_insertion:
+                    generate_report(self.start_time, dst_path, file_name,
+                                    print_time_elapsed, prefix)
+                    break
+                else:
+                    generate_report(self.start_time, traj_dir_path, file_name,
+                                    print_time_elapsed, prefix)
         return None
 
     def do_kmc_steps(self, dst_path, output_data, random_seed, compute_mode):
@@ -2521,8 +2621,17 @@ class Run(object):
             if self.doping_active:
                 self.system_relative_energies = np.copy(self.undoped_system_relative_energies)
 
+                if 'pairwise' in self.doping['insertion_type']:
+                    map_index = self.doping['insertion_type'].index('pairwise')
+                    pairwise_insertion = self.doping['num_dopants'][map_index] != 0
+                else:
+                    pairwise_insertion = 0
+
                 # Load doping distribution
-                site_indices_file_path = traj_dir_path / 'site_indices.npy'
+                if pairwise_insertion:
+                    site_indices_file_path = traj_dir_path.parent / 'site_indices.npy'
+                else:
+                    site_indices_file_path = traj_dir_path / 'site_indices.npy'
                 site_indices_data = np.load(site_indices_file_path)
                 site_indices_list = site_indices_data[:, 0]
                 dopant_element_type_index_list = site_indices_data[:, 1]
@@ -2564,7 +2673,6 @@ class Run(object):
             current_state_charge_config_prod = np.multiply(
                                     current_state_charge_config.transpose(),
                                     current_state_charge_config)
-            # TODO: How helpful is recording precomputed_array?
             current_state_energy = (ewald_neut
                                     + np.sum(np.multiply(current_state_charge_config_prod,
                                                          self.precomputed_array)))

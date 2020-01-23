@@ -1,4 +1,6 @@
-#!/usr/bin/env python
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 import numpy as np
 import yaml
@@ -62,7 +64,7 @@ def material_run(dst_path):
         # Load input files to instantiate system class
         hop_neighbor_list_file_name = input_directory_path.joinpath(
                                             'hop_neighbor_list.npy')
-        hop_neighbor_list = np.load(hop_neighbor_list_file_name)[()]
+        hop_neighbor_list = np.load(hop_neighbor_list_file_name, allow_pickle=True)[()]
         pairwise_min_image_vector_data_file_path = (
                             input_directory_path.joinpath(
                                 'pairwise_min_image_vector_data.npy'))
